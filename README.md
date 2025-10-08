@@ -3,7 +3,7 @@
 ## Deliverable
 We will grade the `shell56.c` file (see below) in your Khoury GitHub repository.
 
-NOTE - REMOVE ALL DEBUG PRINTFS WHEN YOUR DONE OR TESTS WILL FAIL
+NOTE - REMOVE ALL DEBUG PRINTFS WHEN YOU'RE DONE OR TESTS WILL FAIL
 
 E.g. the assignment states that the output from `pwd` will be the name of the current directory, 
 not multiple lines of debug output followed by the current directory. 
