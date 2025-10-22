@@ -1,6 +1,14 @@
 /*
  * file:        shell56.c
- * description: skeleton code for simple shell
+ * description: Simple shell implementation for CS 5600 Lab 2
+ *              Implements Steps 1-4: Signal handling, builtin commands,
+ *              external commands, and $? variable expansion
+ *
+ * Features implemented:
+ * - Step 1: Signal handling (ignore SIGINT in interactive mode)
+ * - Step 2: Builtin commands (cd, pwd, exit)
+ * - Step 3: External command execution (fork/exec/wait)
+ * - Step 4: $? variable expansion
  *
  * Peter Desnoyers, Northeastern CS5600 Fall 2025
  */
@@ -25,7 +33,7 @@
 
 #define MAX_TOKENS 32
 
-/* Global variable to store exit status */
+/* Global variable to store exit status for $? variable expansion */
 int last_exit_status = 0;
 
 /* Function declarations */
@@ -40,9 +48,9 @@ int main(int argc, char **argv)
     bool interactive = isatty(STDIN_FILENO); /* see: man 3 isatty */
     FILE *fp = stdin;
     
-    /* Step 1: Handle signals */
+    /* Step 1: Handle signals - ignore SIGINT in interactive mode */
     if (interactive) {
-        signal(SIGINT, SIG_IGN); /* ignore SIGINT=^C */
+        signal(SIGINT, SIG_IGN); /* ignore SIGINT=^C so shell doesn't exit */
     }
 
     if (argc == 2) {
@@ -81,14 +89,13 @@ int main(int argc, char **argv)
         if (!fgets(line, sizeof(line), fp))
             break;
 
-        /* read a line, tokenize it, and print it out
-         */
+        /* Parse the input line into tokens using the provided parser */
         int n_tokens = parse(line, MAX_TOKENS, tokens, linebuf, sizeof(linebuf));
 
-        /* Expand $? variable */
+        /* Step 4: Expand $? variable before executing command */
         expand_dollar_question(tokens, n_tokens);
 
-        /* Execute the command */
+        /* Execute the command if there are any tokens */
         if (n_tokens > 0) {
             execute_command(tokens, n_tokens);
         }
@@ -98,34 +105,37 @@ int main(int argc, char **argv)
         printf("\n");           /* to see why, try deleting this and then quit with ^D */
 }
 
-/* Execute a command by checking if it's builtin or external */
+/* Main command execution dispatcher - determines if command is builtin or external */
 void execute_command(char **tokens, int n_tokens) {
-    if (n_tokens == 0) return;
+    if (n_tokens == 0) return; /* Skip empty commands */
     
     if (is_builtin_command(tokens[0])) {
+        /* Step 2: Execute builtin commands (cd, pwd, exit) */
         last_exit_status = execute_builtin(tokens, n_tokens);
     } else {
+        /* Step 3: Execute external commands using fork/exec */
         execute_external(tokens, n_tokens);
     }
 }
 
-/* Check if command is a builtin command */
+/* Check if the given command is one of our builtin commands */
 int is_builtin_command(char *command) {
-    if (strcmp(command, "cd") == 0) return 1;
-    if (strcmp(command, "pwd") == 0) return 1;
-    if (strcmp(command, "exit") == 0) return 1;
-    return 0;
+    if (strcmp(command, "cd") == 0) return 1;    /* Change directory */
+    if (strcmp(command, "pwd") == 0) return 1;     /* Print working directory */
+    if (strcmp(command, "exit") == 0) return 1;   /* Exit shell */
+    return 0; /* Not a builtin command */
 }
 
-/* Execute builtin commands */
+/* Step 2: Execute builtin commands (cd, pwd, exit) */
 int execute_builtin(char **tokens, int n_tokens) {
     if (strcmp(tokens[0], "cd") == 0) {
+        /* Handle cd command - change directory */
         if (n_tokens > 2) {
             fprintf(stderr, "cd: wrong number of arguments\n");
             return 1;
         }
         if (n_tokens == 1) {
-            // cd with no arguments - go to home directory
+            /* cd with no arguments - go to home directory */
             char *home = getenv("HOME");
             if (home == NULL) {
                 fprintf(stderr, "cd: HOME not set\n");
@@ -136,6 +146,7 @@ int execute_builtin(char **tokens, int n_tokens) {
                 return 1;
             }
         } else {
+            /* cd with directory argument */
             if (chdir(tokens[1]) != 0) {
                 fprintf(stderr, "cd: %s\n", strerror(errno));
                 return 1;
@@ -143,6 +154,7 @@ int execute_builtin(char **tokens, int n_tokens) {
         }
         return 0;
     } else if (strcmp(tokens[0], "pwd") == 0) {
+        /* Handle pwd command - print working directory */
         if (n_tokens > 1) {
             fprintf(stderr, "pwd: too many arguments\n");
             return 1;
@@ -156,53 +168,60 @@ int execute_builtin(char **tokens, int n_tokens) {
             return 1;
         }
     } else if (strcmp(tokens[0], "exit") == 0) {
+        /* Handle exit command - terminate shell */
         if (n_tokens > 2) {
             fprintf(stderr, "exit: too many arguments\n");
             return 1;
         }
         if (n_tokens == 1) {
-            exit(0);
+            exit(0); /* Exit with status 0 */
         } else {
-            exit(atoi(tokens[1]));
+            exit(atoi(tokens[1])); /* Exit with specified status */
         }
     }
     return 0;
 }
 
 
-/* Execute external command using fork and exec */
+/* Step 3: Execute external commands using fork/exec/wait pattern */
 void execute_external(char **tokens, int n_tokens) {
     pid_t pid = fork();
     
     if (pid == 0) {
-        // Child process - restore SIGINT to default behavior
+        /* Child process - restore SIGINT to default behavior for the command */
         signal(SIGINT, SIG_DFL);
+        
+        /* Execute the external command */
         execvp(tokens[0], tokens);
-        // If execvp returns, there was an error
+        
+        /* If execvp returns, there was an error */
         fprintf(stderr, "%s: %s\n", tokens[0], strerror(errno));
         exit(EXIT_FAILURE);
     } else if (pid > 0) {
-        // Parent process
+        /* Parent process - wait for child to complete */
         int status;
         do {
             waitpid(pid, &status, WUNTRACED);
         } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        
+        /* Store the exit status for $? variable */
         last_exit_status = WEXITSTATUS(status);
     } else {
-        // Fork failed
+        /* Fork failed */
         perror("fork");
         last_exit_status = 1;
     }
 }
 
-/* Expand $? variable in tokens */
+/* Step 4: Expand $? variable in command tokens before execution */
 void expand_dollar_question(char **tokens, int n_tokens) {
-    static char qbuf[16];
+    static char qbuf[16]; /* Static buffer to hold the string representation of exit status */
     snprintf(qbuf, sizeof(qbuf), "%d", last_exit_status);
     
+    /* Replace any $? tokens with the actual exit status string */
     for (int i = 0; i < n_tokens; i++) {
         if (strcmp(tokens[i], "$?") == 0) {
-            tokens[i] = qbuf;
+            tokens[i] = qbuf; /* Point to our static buffer */
         }
     }
 }
