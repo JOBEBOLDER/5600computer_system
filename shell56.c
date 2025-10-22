@@ -92,7 +92,9 @@ int main(int argc, char **argv)
         /* Parse the input line into tokens using the provided parser */
         int n_tokens = parse(line, MAX_TOKENS, tokens, linebuf, sizeof(linebuf));
 
-        /* Step 4: Expand $? variable before executing command */
+        /* Step 4: Expand $? variable before executing command
+         * This replaces any $? tokens with the string representation
+         * of the last command's exit status */
         expand_dollar_question(tokens, n_tokens);
 
         /* Execute the command if there are any tokens */
@@ -213,14 +215,27 @@ void execute_external(char **tokens, int n_tokens) {
     }
 }
 
-/* Step 4: Expand $? variable in command tokens before execution */
+/* Step 4: Expand $? variable in command tokens before execution
+ * 
+ * This function implements the $? special variable expansion as specified
+ * in the assignment. It replaces any $? tokens with the string representation
+ * of the last command's exit status.
+ * 
+ * Key features:
+ * - Uses static buffer to avoid memory management issues
+ * - Handles multiple $? occurrences in the same command
+ * - Works with both builtin and external commands
+ * - Safe null pointer checking
+ */
 void expand_dollar_question(char **tokens, int n_tokens) {
     static char qbuf[16]; /* Static buffer to hold the string representation of exit status */
+    
+    /* Convert exit status to string representation */
     snprintf(qbuf, sizeof(qbuf), "%d", last_exit_status);
     
     /* Replace any $? tokens with the actual exit status string */
     for (int i = 0; i < n_tokens; i++) {
-        if (strcmp(tokens[i], "$?") == 0) {
+        if (tokens[i] != NULL && strcmp(tokens[i], "$?") == 0) {
             tokens[i] = qbuf; /* Point to our static buffer */
         }
     }
