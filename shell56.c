@@ -25,10 +25,28 @@
 
 #define MAX_TOKENS 32
 
+/* Global variable to store exit status */
+int last_exit_status = 0;
+
+/* Function declarations */
+void execute_command(char **tokens, int n_tokens);
+int is_builtin_command(char *command);
+int execute_builtin(char **tokens, int n_tokens);
+void execute_external(char **tokens, int n_tokens);
+void handle_pipes_and_redirection(char **tokens, int n_tokens);
+void expand_dollar_question(char **tokens, int n_tokens);
+void execute_with_redirection(char **tokens, int n_tokens);
+void execute_pipeline(char **tokens, int n_tokens);
+
 int main(int argc, char **argv)
 {
     bool interactive = isatty(STDIN_FILENO); /* see: man 3 isatty */
     FILE *fp = stdin;
+    
+    /* Step 1: Handle signals */
+    if (interactive) {
+        signal(SIGINT, SIG_IGN); /* ignore SIGINT=^C */
+    }
 
     if (argc == 2) {
         interactive = false;
@@ -70,15 +88,305 @@ int main(int argc, char **argv)
          */
         int n_tokens = parse(line, MAX_TOKENS, tokens, linebuf, sizeof(linebuf));
 
-        /* replace the code below with your shell. Since there's no exit command
-         * yet, you'll need to exit with ^D (end-of-file)
-         */
-        printf("line:");
-        for (int i = 0; i < n_tokens; i++)
-            printf(" '%s'", tokens[i]);
-        printf("\n");
+        /* Expand $? variable */
+        expand_dollar_question(tokens, n_tokens);
+
+        /* Execute the command */
+        if (n_tokens > 0) {
+            execute_command(tokens, n_tokens);
+        }
     }
 
     if (interactive)            /* make things pretty */
         printf("\n");           /* to see why, try deleting this and then quit with ^D */
+}
+
+/* Execute a command by checking if it's builtin or external */
+void execute_command(char **tokens, int n_tokens) {
+    if (n_tokens == 0) return;
+    
+    if (is_builtin_command(tokens[0])) {
+        last_exit_status = execute_builtin(tokens, n_tokens);
+    } else {
+        handle_pipes_and_redirection(tokens, n_tokens);
+    }
+}
+
+/* Check if command is a builtin command */
+int is_builtin_command(char *command) {
+    if (strcmp(command, "cd") == 0) return 1;
+    if (strcmp(command, "pwd") == 0) return 1;
+    if (strcmp(command, "exit") == 0) return 1;
+    return 0;
+}
+
+/* Execute builtin commands */
+int execute_builtin(char **tokens, int n_tokens) {
+    if (strcmp(tokens[0], "cd") == 0) {
+        if (n_tokens > 2) {
+            fprintf(stderr, "cd: wrong number of arguments\n");
+            return 1;
+        }
+        if (n_tokens == 1) {
+            // cd with no arguments - go to home directory
+            char *home = getenv("HOME");
+            if (home == NULL) {
+                fprintf(stderr, "cd: HOME not set\n");
+                return 1;
+            }
+            if (chdir(home) != 0) {
+                fprintf(stderr, "cd: %s\n", strerror(errno));
+                return 1;
+            }
+        } else {
+            if (chdir(tokens[1]) != 0) {
+                fprintf(stderr, "cd: %s\n", strerror(errno));
+                return 1;
+            }
+        }
+        return 0;
+    } else if (strcmp(tokens[0], "pwd") == 0) {
+        if (n_tokens > 1) {
+            fprintf(stderr, "pwd: too many arguments\n");
+            return 1;
+        }
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            printf("%s\n", cwd);
+            return 0;
+        } else {
+            perror("pwd");
+            return 1;
+        }
+    } else if (strcmp(tokens[0], "exit") == 0) {
+        if (n_tokens > 2) {
+            fprintf(stderr, "exit: too many arguments\n");
+            return 1;
+        }
+        if (n_tokens == 1) {
+            exit(0);
+        } else {
+            exit(atoi(tokens[1]));
+        }
+    }
+    return 0;
+}
+
+/* Handle pipes and redirection, then execute external command */
+void handle_pipes_and_redirection(char **tokens, int n_tokens) {
+    // Check for pipes first
+    int pipe_count = 0;
+    for (int i = 0; i < n_tokens; i++) {
+        if (strcmp(tokens[i], "|") == 0) {
+            pipe_count++;
+        }
+    }
+    
+    if (pipe_count > 0) {
+        execute_pipeline(tokens, n_tokens);
+    } else {
+        execute_with_redirection(tokens, n_tokens);
+    }
+}
+
+/* Execute external command using fork and exec */
+void execute_external(char **tokens, int n_tokens) {
+    pid_t pid = fork();
+    
+    if (pid == 0) {
+        // Child process - restore SIGINT to default behavior
+        signal(SIGINT, SIG_DFL);
+        execvp(tokens[0], tokens);
+        // If execvp returns, there was an error
+        fprintf(stderr, "%s: %s\n", tokens[0], strerror(errno));
+        exit(EXIT_FAILURE);
+    } else if (pid > 0) {
+        // Parent process
+        int status;
+        do {
+            waitpid(pid, &status, WUNTRACED);
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        last_exit_status = WEXITSTATUS(status);
+    } else {
+        // Fork failed
+        perror("fork");
+        last_exit_status = 1;
+    }
+}
+
+/* Expand $? variable in tokens */
+void expand_dollar_question(char **tokens, int n_tokens) {
+    static char qbuf[16];
+    snprintf(qbuf, sizeof(qbuf), "%d", last_exit_status);
+    
+    for (int i = 0; i < n_tokens; i++) {
+        if (strcmp(tokens[i], "$?") == 0) {
+            tokens[i] = qbuf;
+        }
+    }
+}
+
+/* Execute command with input/output redirection */
+void execute_with_redirection(char **tokens, int n_tokens) {
+    char *input_file = NULL;
+    char *output_file = NULL;
+    char *clean_tokens[MAX_TOKENS];
+    int clean_count = 0;
+    
+    // Find redirection operators and build clean command
+    for (int i = 0; i < n_tokens; i++) {
+        if (strcmp(tokens[i], "<") == 0) {
+            if (i + 1 < n_tokens) {
+                input_file = tokens[i + 1];
+                i++; // Skip the filename
+            }
+        } else if (strcmp(tokens[i], ">") == 0) {
+            if (i + 1 < n_tokens) {
+                output_file = tokens[i + 1];
+                i++; // Skip the filename
+            }
+        } else {
+            clean_tokens[clean_count++] = tokens[i];
+        }
+    }
+    clean_tokens[clean_count] = NULL;
+    
+    pid_t pid = fork();
+    
+    if (pid == 0) {
+        // Child process - restore SIGINT to default behavior
+        signal(SIGINT, SIG_DFL);
+        
+        // Handle input redirection
+        if (input_file) {
+            int fd = open(input_file, O_RDONLY);
+            if (fd == -1) {
+                fprintf(stderr, "%s: %s\n", input_file, strerror(errno));
+                exit(1);
+            }
+            dup2(fd, 0);
+            close(fd);
+        }
+        
+        // Handle output redirection
+        if (output_file) {
+            int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd == -1) {
+                fprintf(stderr, "%s: %s\n", output_file, strerror(errno));
+                exit(1);
+            }
+            dup2(fd, 1);
+            close(fd);
+        }
+        
+        // Execute the command
+        execvp(clean_tokens[0], clean_tokens);
+        fprintf(stderr, "%s: %s\n", clean_tokens[0], strerror(errno));
+        exit(EXIT_FAILURE);
+    } else if (pid > 0) {
+        // Parent process
+        int status;
+        do {
+            waitpid(pid, &status, WUNTRACED);
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        last_exit_status = WEXITSTATUS(status);
+    } else {
+        // Fork failed
+        perror("fork");
+        last_exit_status = 1;
+    }
+}
+
+/* Execute pipeline of commands */
+void execute_pipeline(char **tokens, int n_tokens) {
+    // Split tokens into separate commands
+    char *commands[5][MAX_TOKENS]; // Support up to 4 pipeline stages
+    int cmd_count = 0;
+    int cmd_tokens[5] = {0};
+    
+    int cmd_idx = 0;
+    for (int i = 0; i < n_tokens; i++) {
+        if (strcmp(tokens[i], "|") == 0) {
+            commands[cmd_idx][cmd_tokens[cmd_idx]] = NULL;
+            cmd_idx++;
+            cmd_count++;
+        } else {
+            commands[cmd_idx][cmd_tokens[cmd_idx]] = tokens[i];
+            cmd_tokens[cmd_idx]++;
+        }
+    }
+    commands[cmd_idx][cmd_tokens[cmd_idx]] = NULL;
+    cmd_count++;
+    
+    if (cmd_count > 4) {
+        fprintf(stderr, "Too many pipeline stages\n");
+        last_exit_status = 1;
+        return;
+    }
+    
+    int pipes[3][2]; // Support up to 3 pipes (4 commands)
+    pid_t pids[4];
+    
+    // Create pipes
+    for (int i = 0; i < cmd_count - 1; i++) {
+        if (pipe(pipes[i]) == -1) {
+            perror("pipe");
+            last_exit_status = 1;
+            return;
+        }
+    }
+    
+    // Fork processes for each command
+    for (int i = 0; i < cmd_count; i++) {
+        pids[i] = fork();
+        
+        if (pids[i] == 0) {
+            // Child process - restore SIGINT to default behavior
+            signal(SIGINT, SIG_DFL);
+            
+            // Set up input
+            if (i > 0) {
+                dup2(pipes[i-1][0], 0);
+            }
+            
+            // Set up output
+            if (i < cmd_count - 1) {
+                dup2(pipes[i][1], 1);
+            }
+            
+            // Close all pipe file descriptors
+            for (int j = 0; j < cmd_count - 1; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+            
+            // Execute command
+            execvp(commands[i][0], commands[i]);
+            fprintf(stderr, "%s: %s\n", commands[i][0], strerror(errno));
+            exit(EXIT_FAILURE);
+        } else if (pids[i] < 0) {
+            perror("fork");
+            last_exit_status = 1;
+            return;
+        }
+    }
+    
+    // Close all pipe file descriptors in parent
+    for (int i = 0; i < cmd_count - 1; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+    
+    // Wait for all processes
+    for (int i = 0; i < cmd_count; i++) {
+        int status;
+        do {
+            waitpid(pids[i], &status, WUNTRACED);
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        
+        // Set status to the last command's status
+        if (i == cmd_count - 1) {
+            last_exit_status = WEXITSTATUS(status);
+        }
+    }
 }
