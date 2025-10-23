@@ -1,14 +1,15 @@
 /*
  * file:        shell56.c
  * description: Simple shell implementation for CS 5600 Lab 2
- *              Implements Steps 1-4: Signal handling, builtin commands,
- *              external commands, and $? variable expansion
+ *              Implements Steps 1-5: Signal handling, builtin commands,
+ *              external commands, $? variable expansion, and file redirection
  *
  * Features implemented:
  * - Step 1: Signal handling (ignore SIGINT in interactive mode)
  * - Step 2: Builtin commands (cd, pwd, exit)
  * - Step 3: External command execution (fork/exec/wait)
  * - Step 4: $? variable expansion
+ * - Step 5: File redirection (< and >)
  *
  * Peter Desnoyers, Northeastern CS5600 Fall 2025
  */
@@ -42,6 +43,7 @@ int is_builtin_command(char *command);
 int execute_builtin(char **tokens, int n_tokens);
 void execute_external(char **tokens, int n_tokens);
 void expand_dollar_question(char **tokens, int n_tokens);
+void execute_with_redirection(char **tokens, int n_tokens);
 
 int main(int argc, char **argv)
 {
@@ -115,8 +117,22 @@ void execute_command(char **tokens, int n_tokens) {
         /* Step 2: Execute builtin commands (cd, pwd, exit) */
         last_exit_status = execute_builtin(tokens, n_tokens);
     } else {
-        /* Step 3: Execute external commands using fork/exec */
-        execute_external(tokens, n_tokens);
+        /* Check for redirection operators */
+        bool has_redirection = false;
+        for (int i = 0; i < n_tokens; i++) {
+            if (strcmp(tokens[i], "<") == 0 || strcmp(tokens[i], ">") == 0) {
+                has_redirection = true;
+                break;
+            }
+        }
+        
+        if (has_redirection) {
+            /* Step 5: Execute external commands with redirection */
+            execute_with_redirection(tokens, n_tokens);
+        } else {
+            /* Step 3: Execute external commands using fork/exec */
+            execute_external(tokens, n_tokens);
+        }
     }
 }
 
@@ -238,6 +254,95 @@ void expand_dollar_question(char **tokens, int n_tokens) {
         if (tokens[i] != NULL && strcmp(tokens[i], "$?") == 0) {
             tokens[i] = qbuf; /* Point to our static buffer */
         }
+    }
+}
+
+/* Step 5: Execute external commands with input/output redirection
+ * 
+ * This function handles < and > redirection operators as specified in the assignment.
+ * It uses dup2 system call to redirect stdin/stdout to/from files.
+ * 
+ * Key features:
+ * - Input redirection: < filename (redirects stdin from file)
+ * - Output redirection: > filename (redirects stdout to file)
+ * - Proper error handling for file operations
+ * - File descriptor management to avoid leaks
+ */
+void execute_with_redirection(char **tokens, int n_tokens) {
+    char *input_file = NULL;
+    char *output_file = NULL;
+    char *clean_tokens[MAX_TOKENS];
+    int clean_count = 0;
+    
+    /* Parse tokens to find redirection operators and build clean command */
+    for (int i = 0; i < n_tokens; i++) {
+        if (strcmp(tokens[i], "<") == 0) {
+            /* Input redirection */
+            if (i + 1 < n_tokens) {
+                input_file = tokens[i + 1];
+                i++; /* Skip the filename */
+            }
+        } else if (strcmp(tokens[i], ">") == 0) {
+            /* Output redirection */
+            if (i + 1 < n_tokens) {
+                output_file = tokens[i + 1];
+                i++; /* Skip the filename */
+            }
+        } else {
+            /* Regular command argument */
+            clean_tokens[clean_count++] = tokens[i];
+        }
+    }
+    clean_tokens[clean_count] = NULL;
+    
+    /* Fork process for command execution */
+    pid_t pid = fork();
+    
+    if (pid == 0) {
+        /* Child process - restore SIGINT to default behavior */
+        signal(SIGINT, SIG_DFL);
+        
+        /* Handle input redirection */
+        if (input_file) {
+            int fd = open(input_file, O_RDONLY);
+            if (fd == -1) {
+                fprintf(stderr, "%s: %s\n", input_file, strerror(errno));
+                exit(1);
+            }
+            dup2(fd, 0); /* Redirect stdin to file */
+            close(fd);   /* Close original file descriptor */
+        }
+        
+        /* Handle output redirection */
+        if (output_file) {
+            int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd == -1) {
+                fprintf(stderr, "%s: %s\n", output_file, strerror(errno));
+                exit(1);
+            }
+            dup2(fd, 1); /* Redirect stdout to file */
+            close(fd);    /* Close original file descriptor */
+        }
+        
+        /* Execute the command */
+        execvp(clean_tokens[0], clean_tokens);
+        
+        /* If execvp returns, there was an error */
+        fprintf(stderr, "%s: %s\n", clean_tokens[0], strerror(errno));
+        exit(EXIT_FAILURE);
+    } else if (pid > 0) {
+        /* Parent process - wait for child to complete */
+        int status;
+        do {
+            waitpid(pid, &status, WUNTRACED);
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        
+        /* Store the exit status for $? variable */
+        last_exit_status = WEXITSTATUS(status);
+    } else {
+        /* Fork failed */
+        perror("fork");
+        last_exit_status = 1;
     }
 }
 
