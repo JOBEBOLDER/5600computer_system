@@ -44,6 +44,7 @@ int execute_builtin(char **tokens, int n_tokens);
 void execute_external(char **tokens, int n_tokens);
 void expand_dollar_question(char **tokens, int n_tokens);
 void execute_with_redirection(char **tokens, int n_tokens);
+void execute_pipeline(char **tokens, int n_tokens);
 
 int main(int argc, char **argv)
 {
@@ -117,21 +118,35 @@ void execute_command(char **tokens, int n_tokens) {
         /* Step 2: Execute builtin commands (cd, pwd, exit) */
         last_exit_status = execute_builtin(tokens, n_tokens);
     } else {
-        /* Check for redirection operators */
-        bool has_redirection = false;
+        /* Check for pipe operators first */
+        bool has_pipes = false;
         for (int i = 0; i < n_tokens; i++) {
-            if (strcmp(tokens[i], "<") == 0 || strcmp(tokens[i], ">") == 0) {
-                has_redirection = true;
+            if (strcmp(tokens[i], "|") == 0) {
+                has_pipes = true;
                 break;
             }
         }
         
-        if (has_redirection) {
-            /* Step 5: Execute external commands with redirection */
-            execute_with_redirection(tokens, n_tokens);
+        if (has_pipes) {
+            /* Step 6: Execute pipeline of commands */
+            execute_pipeline(tokens, n_tokens);
         } else {
-            /* Step 3: Execute external commands using fork/exec */
-            execute_external(tokens, n_tokens);
+            /* Check for redirection operators */
+            bool has_redirection = false;
+            for (int i = 0; i < n_tokens; i++) {
+                if (strcmp(tokens[i], "<") == 0 || strcmp(tokens[i], ">") == 0) {
+                    has_redirection = true;
+                    break;
+                }
+            }
+            
+            if (has_redirection) {
+                /* Step 5: Execute external commands with redirection */
+                execute_with_redirection(tokens, n_tokens);
+            } else {
+                /* Step 3: Execute external commands using fork/exec */
+                execute_external(tokens, n_tokens);
+            }
         }
     }
 }
