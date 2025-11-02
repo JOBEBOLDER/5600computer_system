@@ -163,31 +163,38 @@ int is_builtin_command(char *command) {
 /* Step 2: Execute builtin commands (cd, pwd, exit) */
 int execute_builtin(char **tokens, int n_tokens) {
     if (strcmp(tokens[0], "cd") == 0) {
-        /* cd command - ignore arguments, always chdir to HOME directory */
-        char *home = getenv("HOME");
-        if (home == NULL) {
-            fprintf(stderr, "cd: HOME not set\n");
+        /* cd command - change directory */
+        char *target_dir;
+        
+        if (n_tokens == 1) {
+            /* No arguments - chdir to HOME directory */
+            target_dir = getenv("HOME");
+            if (target_dir == NULL) {
+                fprintf(stderr, "cd: HOME not set\n");
+                return 1;
+            }
+        } else if (n_tokens == 2) {
+            /* One argument - chdir to specified directory */
+            target_dir = tokens[1];
+        } else {
+            /* Too many arguments */
+            fprintf(stderr, "cd: too many arguments\n");
             return 1;
         }
-        if (chdir(home) != 0) {
+        
+        if (chdir(target_dir) != 0) {
             fprintf(stderr, "cd: %s\n", strerror(errno));
             return 1;
         }
         return 0;
     } else if (strcmp(tokens[0], "pwd") == 0) {
-        /* pwd command - print current directory, convert lowercase to uppercase */
+        /* pwd command - print current directory */
         if (n_tokens > 1) {
             fprintf(stderr, "pwd: too many arguments\n");
             return 1;
         }
         char cwd[PATH_MAX];
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
-            /* Convert lowercase letters to uppercase */
-            for (int i = 0; cwd[i] != '\0'; i++) {
-                if (cwd[i] >= 'a' && cwd[i] <= 'z') {
-                    cwd[i] = cwd[i] - 'a' + 'A';
-                }
-            }
             printf("%s\n", cwd);
             return 0;
         } else {
@@ -426,7 +433,7 @@ void execute_pipeline(char **tokens, int n_tokens) {
                 dup2(pipes[i][1], 1); /* Redirect stdout to next pipe */
             }
             
-            /* Close all pipe file descriptors in child */
+            /* Close all pipe file descriptors in child (after dup2) */
             for (int j = 0; j < cmd_count - 1; j++) {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
@@ -446,10 +453,12 @@ void execute_pipeline(char **tokens, int n_tokens) {
         }
     }
     
-    /* Close only write-side file descriptors in parent process */
+    /* Close all pipe file descriptors in parent process */
+    /* After forking all children, parent should close all pipe fds
+     * since children have already dup2'd what they need */
     for (int i = 0; i < cmd_count - 1; i++) {
-        // Do not close pipes[i][0] - keep read side open
-        close(pipes[i][1]);  // Only close write side
+        close(pipes[i][0]);  /* Close read end */
+        close(pipes[i][1]);  /* Close write end */
     }
     
     /* Wait for all processes to complete */
