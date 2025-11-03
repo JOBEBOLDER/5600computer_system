@@ -407,8 +407,10 @@ int execute_builtin(char **tokens, int n_tokens) {
             /*
              * 情况3：多个参数，这是错误的
              * 例如：cd /tmp /home，这是不允许的
+             * 
+             * 注意：根据测试要求，错误消息应该是 "wrong number of arguments"
              */
-            fprintf(stderr, "cd: too many arguments\n");
+            fprintf(stderr, "cd: wrong number of arguments\n");
             return 1;
         }
         
@@ -943,25 +945,56 @@ void execute_with_redirection(char **tokens, int n_tokens) {
  */
 void execute_pipeline(char **tokens, int n_tokens) {
     /*
-     * 第一步：将tokens分割成多个独立的命令
+     * TEST 12: 检测悬空管道语法错误
      * 
-     * commands数组存储分割后的命令
-     * 例如："ls | grep test | wc" 会被分割成：
-     *   commands[0] = ["ls", NULL]
-     *   commands[1] = ["grep", "test", NULL]
-     *   commands[2] = ["wc", NULL]
+     * 需要检查以下错误情况：
+     *   - | 在开头：第一个token就是 |
+     *   - | 在结尾：最后一个token是 |
+     *   - 连续两个 |：相邻的token都是 |
+     */
+    if (n_tokens > 0 && strcmp(tokens[0], "|") == 0) {
+        // | 在开头，语法错误
+        last_exit_status = 1;
+        return;
+    }
+    if (n_tokens > 0 && strcmp(tokens[n_tokens - 1], "|") == 0) {
+        // | 在结尾，语法错误
+        last_exit_status = 1;
+        return;
+    }
+    // 检查连续两个 |
+    for (int i = 0; i < n_tokens - 1; i++) {
+        if (strcmp(tokens[i], "|") == 0 && strcmp(tokens[i + 1], "|") == 0) {
+            // 连续两个 |，语法错误
+            last_exit_status = 1;
+            return;
+        }
+    }
+    
+    /*
+     * 第一步：将tokens分割成多个独立的命令，同时处理每个命令的重定向
+     * 
+     * commands数组存储分割后的命令（去除重定向操作符）
+     * 例如："cat < file1 | grep test > file2" 会被分割成：
+     *   commands[0] = ["cat", NULL], input_files[0] = "file1", output_files[0] = NULL
+     *   commands[1] = ["grep", "test", NULL], input_files[1] = NULL, output_files[1] = "file2"
      * 
      * 最多支持5个命令（4个管道），所以第一维是5
      */
     char *commands[5][MAX_TOKENS];
     int cmd_count = 0;           // 实际有多少个命令
-    int cmd_tokens[5] = {0};     // 每个命令有多少个token
+    int cmd_tokens[5] = {0};     // 每个命令有多少个token（不包括重定向操作符）
+    char *input_files[5] = {NULL};   // 每个命令的输入重定向文件
+    char *output_files[5] = {NULL};  // 每个命令的输出重定向文件
     
     /*
-     * 遍历所有token，按 | 符号分割命令
+     * 遍历所有token，按 | 符号分割命令，同时提取重定向操作符
      * 
-     * 例如："ls -l | grep test" 的tokens是 ["ls", "-l", "|", "grep", "test"]
-     * 我们需要将其分割成两个命令：["ls", "-l"] 和 ["grep", "test"]
+     * 例如："cat < file1 | grep test > file2" 的tokens是 
+     * ["cat", "<", "file1", "|", "grep", "test", ">", "file2"]
+     * 我们需要将其分割成：
+     *   命令0: ["cat"], 输入文件: "file1", 输出文件: NULL
+     *   命令1: ["grep", "test"], 输入文件: NULL, 输出文件: "file2"
      */
     int cmd_idx = 0; // 当前正在构建的命令索引（0, 1, 2...）
     for (int i = 0; i < n_tokens; i++) {
@@ -975,9 +1008,28 @@ void execute_pipeline(char **tokens, int n_tokens) {
             commands[cmd_idx][cmd_tokens[cmd_idx]] = NULL;
             cmd_idx++;
             cmd_count++; // 已完成的命令数+1
+        } else if (strcmp(tokens[i], "<") == 0) {
+            /*
+             * 输入重定向操作符 <
+             * 下一个token是输入文件名
+             */
+            if (i + 1 < n_tokens && strcmp(tokens[i + 1], "|") != 0) {
+                input_files[cmd_idx] = tokens[i + 1];
+                i++; // 跳过文件名
+            }
+        } else if (strcmp(tokens[i], ">") == 0) {
+            /*
+             * 输出重定向操作符 >
+             * 下一个token是输出文件名
+             */
+            if (i + 1 < n_tokens && strcmp(tokens[i + 1], "|") != 0) {
+                output_files[cmd_idx] = tokens[i + 1];
+                i++; // 跳过文件名
+            }
         } else {
             /*
              * 这是命令的一个token（命令名或参数），添加到当前命令中
+             * （不包括重定向操作符和文件名，因为它们已经单独处理了）
              */
             commands[cmd_idx][cmd_tokens[cmd_idx]] = tokens[i];
             cmd_tokens[cmd_idx]++;
@@ -990,6 +1042,19 @@ void execute_pipeline(char **tokens, int n_tokens) {
      */
     commands[cmd_idx][cmd_tokens[cmd_idx]] = NULL;
     cmd_count++;
+    
+    /*
+     * 检查是否有空命令（TEST 12要求）
+     * 
+     * 如果某个命令分割后没有任何token（除了NULL），这是语法错误
+     */
+    for (int i = 0; i < cmd_count; i++) {
+        if (cmd_tokens[i] == 0) {
+            // 空命令，语法错误
+            last_exit_status = 1;
+            return;
+        }
+    }
     
     /*
      * 检查管道阶段数是否超过限制
@@ -1058,9 +1123,10 @@ void execute_pipeline(char **tokens, int n_tokens) {
             signal(SIGINT, SIG_DFL);
             
             /*
-             * 设置输入重定向：从上一个管道读取
+             * 第一步：先设置管道重定向
              * 
-             * 第一个命令（i=0）不需要输入重定向，它从标准输入读取
+             * 设置输入重定向：从上一个管道读取
+             * 第一个命令（i=0）如果没有输入文件重定向，从标准输入读取
              * 其他命令（i>0）需要从前一个管道（pipes[i-1]）读取输入
              */
             if (i > 0) {
@@ -1074,7 +1140,7 @@ void execute_pipeline(char **tokens, int n_tokens) {
             /*
              * 设置输出重定向：写入下一个管道
              * 
-             * 最后一个命令不需要输出重定向，它向标准输出写入
+             * 最后一个命令如果没有输出文件重定向，向标准输出写入
              * 其他命令需要向管道i的写端写入输出
              */
             if (i < cmd_count - 1) {
@@ -1086,10 +1152,39 @@ void execute_pipeline(char **tokens, int n_tokens) {
             }
             
             /*
+             * 第二步：处理文件重定向（会覆盖管道重定向）
+             * 
+             * TEST 6要求支持：cmd1 < file1 | cmd2 > file2
+             * 文件重定向的优先级高于管道重定向
+             */
+            
+            // 处理输入文件重定向（< filename）
+            if (input_files[i] != NULL) {
+                int fd = open(input_files[i], O_RDONLY);
+                if (fd == -1) {
+                    fprintf(stderr, "%s: %s\n", input_files[i], strerror(errno));
+                    exit(1);
+                }
+                dup2(fd, 0);  // 覆盖标准输入（可能已经设置为管道）
+                close(fd);
+            }
+            
+            // 处理输出文件重定向（> filename）
+            if (output_files[i] != NULL) {
+                int fd = open(output_files[i], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                if (fd == -1) {
+                    fprintf(stderr, "%s: %s\n", output_files[i], strerror(errno));
+                    exit(1);
+                }
+                dup2(fd, 1);  // 覆盖标准输出（可能已经设置为管道）
+                close(fd);
+            }
+            
+            /*
              * 关闭所有管道文件描述符
              * 
              * 为什么要关闭？
-             *   1. 我们已经用dup2将需要的管道端复制到了0和1
+             *   1. 我们已经用dup2将需要的管道端复制到了0和1（或者被文件重定向覆盖了）
              *   2. 原始的管道文件描述符不再需要
              *   3. 关闭它们可以避免文件描述符泄漏
              *   4. 更重要的是：管道只有在所有写端都关闭后，读端才会收到EOF
@@ -1104,8 +1199,8 @@ void execute_pipeline(char **tokens, int n_tokens) {
              * 重定向设置完成，执行命令
              * 
              * 执行时，命令会：
-             *   - 从标准输入读取（实际是从上一个管道）
-             *   - 向标准输出写入（实际是写入下一个管道）
+             *   - 从标准输入读取（可能是文件或管道）
+             *   - 向标准输出写入（可能是文件或管道或标准输出）
              */
             execvp(commands[i][0], commands[i]);
             
